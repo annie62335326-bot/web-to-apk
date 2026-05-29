@@ -1,40 +1,33 @@
 package com.myexample.webtoapk;
 
 import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.os.Build;
-import android.os.Handler;
-import android.os.IBinder;
-import android.os.Looper;
-import android.support.v4.media.MediaMetadataCompat;
-import android.support.v4.media.session.MediaSessionCompat;
-import android.support.v4.media.session.PlaybackStateCompat;
-import android.util.Log;
-import android.util.Base64;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.media.RingtoneManager;
 import android.net.Uri;
-import android.content.BroadcastReceiver;
-import android.content.IntentFilter;
-import android.os.Vibrator;
+import android.os.Build;
+import android.os.IBinder;
 import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.util.Base64;
+import android.util.Log;
 
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
-import androidx.core.app.NotificationCompat.Action;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import androidx.media.app.NotificationCompat.MediaStyle;
 
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -42,6 +35,8 @@ import java.util.concurrent.Executors;
 
 public class MediaPlaybackService extends Service {
     public static final String NOTIFICATION_CHANNEL_ID = "web_app_notifications";
+    public static final String MEDIA_SERVICE_CHANNEL_ID = "media_service_channel";
+    
     public static final String ACTION_UPDATE_METADATA = "com.myexample.webtoapk.UPDATE_METADATA";
     public static final String ACTION_UPDATE_STATE = "com.myexample.webtoapk.UPDATE_STATE";
     public static final String ACTION_SET_HANDLERS = "com.myexample.webtoapk.SET_HANDLERS";
@@ -54,7 +49,7 @@ public class MediaPlaybackService extends Service {
     public static final String ACTION_NEXT = "com.myexample.webtoapk.NEXT";
     public static final String ACTION_PREVIOUS = "com.myexample.webtoapk.PREVIOUS";
 
-    // 新增：消息和铃声相关的 Action
+    // 消息和铃声相关的 Action
     public static final String ACTION_PLAY_MESSAGE_SOUND = "com.myexample.webtoapk.PLAY_MESSAGE_SOUND";
     public static final String ACTION_PLAY_CALL_INCOMING = "com.myexample.webtoapk.PLAY_CALL_INCOMING";
     public static final String ACTION_PLAY_CALL_OUTGOING = "com.myexample.webtoapk.PLAY_CALL_OUTGOING";
@@ -68,11 +63,13 @@ public class MediaPlaybackService extends Service {
     public static final String EXTRA_MEDIA_ACTION = "EXTRA_MEDIA_ACTION";
 
     private static final int NOTIFICATION_ID = 101;
+    private static final int FOREGROUND_SERVICE_ID = 1001;
+    
     private MediaSessionCompat mediaSession;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private BroadcastReceiver becomingNoisyReceiver;
     
-    // 新增：声音播放相关变量
+    // 声音播放相关变量
     private MediaPlayer callMediaPlayer;
     private Vibrator vibrator;
     private boolean isRinging = false;
@@ -94,7 +91,32 @@ public class MediaPlaybackService extends Service {
 
         // 初始化振动器
         vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
+        
+        // 创建前台服务通知渠道（Android 8.0+ 需要）
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                MEDIA_SERVICE_CHANNEL_ID,
+                "媒体服务",
+                NotificationManager.IMPORTANCE_LOW
+            );
+            channel.setDescription("用于播放声音和铃声");
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) {
+                manager.createNotificationChannel(channel);
+            }
+            
+            // 启动前台服务
+            Notification notification = new NotificationCompat.Builder(this, MEDIA_SERVICE_CHANNEL_ID)
+                .setContentTitle("通讯服务")
+                .setContentText("正在运行中...")
+                .setSmallIcon(android.R.drawable.ic_menu_call)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build();
+            
+            startForeground(FOREGROUND_SERVICE_ID, notification);
+        }
 
+        // 初始化 MediaSession
         mediaSession = new MediaSessionCompat(this, "WebToApkMediaSession");
         mediaSession.setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS |
                               MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS);
@@ -134,11 +156,13 @@ public class MediaPlaybackService extends Service {
 
         mediaSession.setActive(true);
 
+        // 注册音频插拔监听
         becomingNoisyReceiver = new BecomingNoisyReceiver();
         IntentFilter intentFilter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
         registerReceiver(becomingNoisyReceiver, intentFilter);
+        
+        Log.d("WebToApk", "MediaPlaybackService onCreate completed");
     }
-    
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -147,6 +171,7 @@ public class MediaPlaybackService extends Service {
         }
 
         String action = intent.getAction();
+        Log.d("WebToApk", "onStartCommand action: " + action);
 
         switch (action) {
             case ACTION_UPDATE_METADATA:
@@ -186,7 +211,7 @@ public class MediaPlaybackService extends Service {
                 sendActionToWebView("previoustrack");
                 break;
                 
-            // ========== 新增：消息和铃声处理 ==========
+            // 消息和铃声处理
             case ACTION_PLAY_MESSAGE_SOUND:
                 playMessageSound();
                 break;
@@ -213,8 +238,9 @@ public class MediaPlaybackService extends Service {
         return START_STICKY;
     }
 
-    // ========== 新增：消息提示音方法 ==========
+    // ========== 消息提示音方法 ==========
     private void playMessageSound() {
+        Log.d("WebToApk", "playMessageSound called");
         try {
             stopCallSound(); // 先停止可能正在播放的铃声
             Uri soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
@@ -222,16 +248,21 @@ public class MediaPlaybackService extends Service {
             if (mp != null) {
                 mp.setOnCompletionListener(m -> {
                     if (m != null) m.release();
+                    Log.d("WebToApk", "Message sound completed");
                 });
                 mp.start();
+                Log.d("WebToApk", "Message sound played successfully");
+            } else {
+                Log.e("WebToApk", "MediaPlayer.create returned null for notification sound");
             }
         } catch (Exception e) {
             Log.e("WebToApk", "播放消息提示音失败", e);
         }
     }
 
-    // ========== 新增：来电铃声方法 ==========
+    // ========== 来电铃声方法 ==========
     private void playCallIncomingSound() {
+        Log.d("WebToApk", "playCallIncomingSound called, isRinging=" + isRinging);
         try {
             if (isRinging) return;
             isRinging = true;
@@ -242,14 +273,18 @@ public class MediaPlaybackService extends Service {
             if (callMediaPlayer != null) {
                 callMediaPlayer.setLooping(true);
                 callMediaPlayer.start();
+                Log.d("WebToApk", "Incoming call sound played successfully");
+            } else {
+                Log.e("WebToApk", "MediaPlayer.create returned null for ringtone");
             }
         } catch (Exception e) {
             Log.e("WebToApk", "播放来电铃声失败", e);
         }
     }
 
-    // ========== 新增：去电铃声方法 ==========
+    // ========== 去电铃声方法 ==========
     private void playCallOutgoingSound() {
+        Log.d("WebToApk", "playCallOutgoingSound called, isRinging=" + isRinging);
         try {
             if (isRinging) return;
             isRinging = true;
@@ -260,14 +295,18 @@ public class MediaPlaybackService extends Service {
             if (callMediaPlayer != null) {
                 callMediaPlayer.setLooping(true);
                 callMediaPlayer.start();
+                Log.d("WebToApk", "Outgoing call sound played successfully");
+            } else {
+                Log.e("WebToApk", "MediaPlayer.create returned null for ringtone");
             }
         } catch (Exception e) {
             Log.e("WebToApk", "播放去电铃声失败", e);
         }
     }
 
-    // ========== 新增：停止铃声方法 ==========
+    // ========== 停止铃声方法 ==========
     private void stopCallSound() {
+        Log.d("WebToApk", "stopCallSound called");
         isRinging = false;
         if (callMediaPlayer != null) {
             try {
@@ -275,24 +314,31 @@ public class MediaPlaybackService extends Service {
                     callMediaPlayer.stop();
                 }
                 callMediaPlayer.release();
-            } catch (Exception e) {}
+            } catch (Exception e) {
+                Log.e("WebToApk", "Error stopping call sound", e);
+            }
             callMediaPlayer = null;
         }
     }
 
-    // ========== 新增：短振动方法 ==========
+    // ========== 短振动方法 ==========
     private void vibrate(int duration) {
+        Log.d("WebToApk", "vibrate called with duration=" + duration);
         if (vibrator != null && vibrator.hasVibrator()) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 vibrator.vibrate(VibrationEffect.createOneShot(duration, VibrationEffect.DEFAULT_AMPLITUDE));
             } else {
                 vibrator.vibrate(duration);
             }
+            Log.d("WebToApk", "Vibration started");
+        } else {
+            Log.w("WebToApk", "Vibrator not available");
         }
     }
 
-    // ========== 新增：长振动方法（来电用） ==========
+    // ========== 长振动方法（来电用） ==========
     private void vibrateLong() {
+        Log.d("WebToApk", "vibrateLong called");
         if (vibrator != null && vibrator.hasVibrator()) {
             long[] pattern = {0, 500, 300, 500, 300, 500};
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -300,28 +346,34 @@ public class MediaPlaybackService extends Service {
             } else {
                 vibrator.vibrate(pattern, 0);
             }
+            Log.d("WebToApk", "Long vibration started");
+        } else {
+            Log.w("WebToApk", "Vibrator not available");
         }
     }
 
-    // ========== 新增：停止振动方法 ==========
+    // ========== 停止振动方法 ==========
     private void stopVibrate() {
+        Log.d("WebToApk", "stopVibrate called");
         if (vibrator != null) {
             vibrator.cancel();
+            Log.d("WebToApk", "Vibration stopped");
         }
     }
 
     private void updateMetadata(String title, String artist, String album, @Nullable String artworkUrl) {
-        MediaMetadataCompat.Builder metadataBuilder = new MediaMetadataCompat.Builder()
-            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
-            .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album);
+        android.support.v4.media.MediaMetadataCompat.Builder metadataBuilder = 
+            new android.support.v4.media.MediaMetadataCompat.Builder()
+            .putString(android.support.v4.media.MediaMetadataCompat.METADATA_KEY_TITLE, title)
+            .putString(android.support.v4.media.MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+            .putString(android.support.v4.media.MediaMetadataCompat.METADATA_KEY_ALBUM, album);
 
         if (artworkUrl != null && !artworkUrl.isEmpty()) {
             try {
                 String base64String = artworkUrl.substring(artworkUrl.indexOf(',') + 1);
                 byte[] decodedBytes = Base64.decode(base64String, Base64.DEFAULT);
                 Bitmap artworkBitmap = BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.length);
-                metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artworkBitmap);
+                metadataBuilder.putBitmap(android.support.v4.media.MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artworkBitmap);
                 mediaSession.setMetadata(metadataBuilder.build());
                 updateNotification();
             } catch (Exception e) {
@@ -336,8 +388,9 @@ public class MediaPlaybackService extends Service {
     }
 
     private void updatePositionState(double duration, double playbackRate, double position) {
-        PlaybackStateCompat currentState = mediaSession.getController().getPlaybackState();
-        if (currentState == null || currentState.getState() == PlaybackStateCompat.STATE_NONE) {
+        android.support.v4.media.session.PlaybackStateCompat currentState = 
+            mediaSession.getController().getPlaybackState();
+        if (currentState == null || currentState.getState() == android.support.v4.media.session.PlaybackStateCompat.STATE_NONE) {
             return;
         }
 
@@ -345,17 +398,18 @@ public class MediaPlaybackService extends Service {
         long positionMs = (long) (position * 1000);
         float rate = (float) playbackRate;
 
-        MediaMetadataCompat currentMetadata = mediaSession.getController().getMetadata();
-        MediaMetadataCompat.Builder metadataBuilder;
+        android.support.v4.media.MediaMetadataCompat currentMetadata = mediaSession.getController().getMetadata();
+        android.support.v4.media.MediaMetadataCompat.Builder metadataBuilder;
         if (currentMetadata == null) {
-            metadataBuilder = new MediaMetadataCompat.Builder();
+            metadataBuilder = new android.support.v4.media.MediaMetadataCompat.Builder();
         } else {
-            metadataBuilder = new MediaMetadataCompat.Builder(currentMetadata);
+            metadataBuilder = new android.support.v4.media.MediaMetadataCompat.Builder(currentMetadata);
         }
-        metadataBuilder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
+        metadataBuilder.putLong(android.support.v4.media.MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
         mediaSession.setMetadata(metadataBuilder.build());
 
-        PlaybackStateCompat.Builder stateBuilder = new PlaybackStateCompat.Builder(currentState);
+        android.support.v4.media.session.PlaybackStateCompat.Builder stateBuilder = 
+            new android.support.v4.media.session.PlaybackStateCompat.Builder(currentState);
         stateBuilder.setState(currentState.getState(), positionMs, rate);
         mediaSession.setPlaybackState(stateBuilder.build());
 
@@ -363,44 +417,48 @@ public class MediaPlaybackService extends Service {
     }
 
     private void updatePlaybackState(String stateStr) {
-        PlaybackStateCompat currentState = mediaSession.getController().getPlaybackState();
+        android.support.v4.media.session.PlaybackStateCompat currentState = 
+            mediaSession.getController().getPlaybackState();
         if (currentState == null) {
-            currentState = new PlaybackStateCompat.Builder()
+            currentState = new android.support.v4.media.session.PlaybackStateCompat.Builder()
                 .setActions(0)
-                .setState(PlaybackStateCompat.STATE_NONE, 0, 1.0f)
+                .setState(android.support.v4.media.session.PlaybackStateCompat.STATE_NONE, 0, 1.0f)
                 .build();
         }
 
         int state;
         switch (stateStr) {
             case "playing":
-                state = PlaybackStateCompat.STATE_PLAYING;
+                state = android.support.v4.media.session.PlaybackStateCompat.STATE_PLAYING;
                 break;
             case "paused":
-                state = PlaybackStateCompat.STATE_PAUSED;
+                state = android.support.v4.media.session.PlaybackStateCompat.STATE_PAUSED;
                 break;
             default:
-                state = PlaybackStateCompat.STATE_STOPPED;
+                state = android.support.v4.media.session.PlaybackStateCompat.STATE_STOPPED;
                 break;
         }
 
-        PlaybackStateCompat.Builder newStateBuilder = new PlaybackStateCompat.Builder(currentState);
-        newStateBuilder.setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f);
+        android.support.v4.media.session.PlaybackStateCompat.Builder newStateBuilder = 
+            new android.support.v4.media.session.PlaybackStateCompat.Builder(currentState);
+        newStateBuilder.setState(state, android.support.v4.media.session.PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f);
         mediaSession.setPlaybackState(newStateBuilder.build());
 
-        if (state == PlaybackStateCompat.STATE_PLAYING || state == PlaybackStateCompat.STATE_PAUSED) {
-            startForeground(NOTIFICATION_ID, buildNotification());
+        if (state == android.support.v4.media.session.PlaybackStateCompat.STATE_PLAYING || 
+            state == android.support.v4.media.session.PlaybackStateCompat.STATE_PAUSED) {
+            startForeground(FOREGROUND_SERVICE_ID, buildNotification());
         } else {
             stopForeground(false);
             NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID);
-            if (state == PlaybackStateCompat.STATE_STOPPED) {
-                 stopSelf();
+            if (state == android.support.v4.media.session.PlaybackStateCompat.STATE_STOPPED) {
+                stopSelf();
             }
         }
     }
 
     private void setMediaActionHandlers(String[] actions) {
-        PlaybackStateCompat currentState = mediaSession.getController().getPlaybackState();
+        android.support.v4.media.session.PlaybackStateCompat currentState = 
+            mediaSession.getController().getPlaybackState();
         if (currentState == null) return;
         
         long supportedActions = 0;
@@ -408,25 +466,27 @@ public class MediaPlaybackService extends Service {
             for (String action : actions) {
                 switch (action) {
                     case "play":
-                        supportedActions |= PlaybackStateCompat.ACTION_PLAY;
+                        supportedActions |= android.support.v4.media.session.PlaybackStateCompat.ACTION_PLAY;
                         break;
                     case "pause":
-                        supportedActions |= PlaybackStateCompat.ACTION_PAUSE;
+                        supportedActions |= android.support.v4.media.session.PlaybackStateCompat.ACTION_PAUSE;
                         break;
                     case "previoustrack":
-                        supportedActions |= PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS;
+                        supportedActions |= android.support.v4.media.session.PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS;
                         break;
                     case "nexttrack":
-                        supportedActions |= PlaybackStateCompat.ACTION_SKIP_TO_NEXT;
+                        supportedActions |= android.support.v4.media.session.PlaybackStateCompat.ACTION_SKIP_TO_NEXT;
                         break;
                 }
             }
         }
-        if ((supportedActions & PlaybackStateCompat.ACTION_PLAY) != 0 && (supportedActions & PlaybackStateCompat.ACTION_PAUSE) != 0) {
-            supportedActions |= PlaybackStateCompat.ACTION_PLAY_PAUSE;
+        if ((supportedActions & android.support.v4.media.session.PlaybackStateCompat.ACTION_PLAY) != 0 && 
+            (supportedActions & android.support.v4.media.session.PlaybackStateCompat.ACTION_PAUSE) != 0) {
+            supportedActions |= android.support.v4.media.session.PlaybackStateCompat.ACTION_PLAY_PAUSE;
         }
 
-        PlaybackStateCompat.Builder newStateBuilder = new PlaybackStateCompat.Builder(currentState);
+        android.support.v4.media.session.PlaybackStateCompat.Builder newStateBuilder = 
+            new android.support.v4.media.session.PlaybackStateCompat.Builder(currentState);
         newStateBuilder.setActions(supportedActions);
         mediaSession.setPlaybackState(newStateBuilder.build());
 
@@ -434,19 +494,20 @@ public class MediaPlaybackService extends Service {
     }
 
     private Notification buildNotification() {
-        MediaMetadataCompat metadata = mediaSession.getController().getMetadata();
-        PlaybackStateCompat playbackState = mediaSession.getController().getPlaybackState();
+        android.support.v4.media.MediaMetadataCompat metadata = mediaSession.getController().getMetadata();
+        android.support.v4.media.session.PlaybackStateCompat playbackState = mediaSession.getController().getPlaybackState();
 
-        if (playbackState == null || (playbackState.getState() != PlaybackStateCompat.STATE_PLAYING && playbackState.getState() != PlaybackStateCompat.STATE_PAUSED)) {
+        if (playbackState == null || (playbackState.getState() != android.support.v4.media.session.PlaybackStateCompat.STATE_PLAYING && 
+            playbackState.getState() != android.support.v4.media.session.PlaybackStateCompat.STATE_PAUSED)) {
             return null;
         }
 
-        boolean isPlaying = playbackState.getState() == PlaybackStateCompat.STATE_PLAYING;
+        boolean isPlaying = playbackState.getState() == android.support.v4.media.session.PlaybackStateCompat.STATE_PLAYING;
 
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID);
         List<Integer> compactActionIndices = new ArrayList<>();
 
-        if ((playbackState.getActions() & PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS) != 0) {
+        if ((playbackState.getActions() & android.support.v4.media.session.PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS) != 0) {
             builder.addAction(
                 android.R.drawable.ic_media_previous, "Previous",
                 createActionIntent(ACTION_PREVIOUS)
@@ -454,8 +515,8 @@ public class MediaPlaybackService extends Service {
             compactActionIndices.add(compactActionIndices.size());
         }
 
-        if ((playbackState.getActions() & PlaybackStateCompat.ACTION_PLAY_PAUSE) != 0) {
-            builder.addAction(new Action(
+        if ((playbackState.getActions() & android.support.v4.media.session.PlaybackStateCompat.ACTION_PLAY_PAUSE) != 0) {
+            builder.addAction(new androidx.core.app.NotificationCompat.Action(
                 isPlaying ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
                 isPlaying ? "Pause" : "Play",
                 createActionIntent(isPlaying ? ACTION_PAUSE : ACTION_PLAY)
@@ -463,7 +524,7 @@ public class MediaPlaybackService extends Service {
             compactActionIndices.add(compactActionIndices.size());
         }
 
-        if ((playbackState.getActions() & PlaybackStateCompat.ACTION_SKIP_TO_NEXT) != 0) {
+        if ((playbackState.getActions() & android.support.v4.media.session.PlaybackStateCompat.ACTION_SKIP_TO_NEXT) != 0) {
             builder.addAction(
                 android.R.drawable.ic_media_next, "Next",
                 createActionIntent(ACTION_NEXT)
@@ -477,11 +538,13 @@ public class MediaPlaybackService extends Service {
         }
 
         Intent contentIntent = new Intent(this, MainActivity.class);
-        PendingIntent contentPendingIntent = PendingIntent.getActivity(this, 0, contentIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent contentPendingIntent = PendingIntent.getActivity(this, 0, contentIntent, 
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         Intent stopIntent = new Intent(this, MediaPlaybackService.class);
         stopIntent.setAction(ACTION_STOP_SERVICE);
-        PendingIntent deletePendingIntent = PendingIntent.getService(this, 0, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent deletePendingIntent = PendingIntent.getService(this, 0, stopIntent, 
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         builder.setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(metadata != null ? metadata.getDescription().getTitle() : "Radio")
@@ -504,11 +567,12 @@ public class MediaPlaybackService extends Service {
             return;
         }
 
-        PlaybackStateCompat state = mediaSession.getController().getPlaybackState();
-        if (state.getState() == PlaybackStateCompat.STATE_PLAYING || state.getState() == PlaybackStateCompat.STATE_PAUSED) {
+        android.support.v4.media.session.PlaybackStateCompat state = mediaSession.getController().getPlaybackState();
+        if (state.getState() == android.support.v4.media.session.PlaybackStateCompat.STATE_PLAYING || 
+            state.getState() == android.support.v4.media.session.PlaybackStateCompat.STATE_PAUSED) {
             Notification notification = buildNotification();
             if (notification != null) {
-                 NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification);
+                NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification);
             }
         } else {
             NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID);
@@ -519,10 +583,12 @@ public class MediaPlaybackService extends Service {
         Intent intent = new Intent(this, MediaPlaybackService.class);
         intent.setAction(action);
         int requestCode = action.hashCode();
-        return PendingIntent.getService(this, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        return PendingIntent.getService(this, requestCode, intent, 
+            PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
     
     private void sendActionToWebView(String action) {
+        Log.d("WebToApk", "sendActionToWebView: " + action);
         Intent intent = new Intent(BROADCAST_MEDIA_ACTION);
         intent.putExtra(EXTRA_MEDIA_ACTION, action);
         LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
@@ -530,6 +596,7 @@ public class MediaPlaybackService extends Service {
     
     @Override
     public void onDestroy() {
+        Log.d("WebToApk", "MediaPlaybackService onDestroy");
         super.onDestroy();
         stopCallSound();
         stopVibrate();
@@ -539,7 +606,9 @@ public class MediaPlaybackService extends Service {
         executor.shutdown();
         try {
             unregisterReceiver(becomingNoisyReceiver);
-        } catch (Exception e) {}
+        } catch (Exception e) {
+            Log.e("WebToApk", "Error unregistering receiver", e);
+        }
     }
     
     @Nullable
