@@ -18,7 +18,7 @@
     <!-- 新增：唤醒锁权限（用于后台播放铃声） -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     
-    <!-- 新增：Android 13+ 媒体权限 -->
+    <!-- 新增：Android 13+ 媒体权 -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
