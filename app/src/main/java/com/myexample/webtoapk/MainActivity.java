@@ -97,9 +97,9 @@ public class MainActivity extends AppCompatActivity {
     private View mainLayout;
     private View errorLayout;
     private ViewGroup parentLayout;
-    private boolean errorOccurred = false; // For WebView after tryAgain
-    private ValueCallback<Uri[]> mFilePathCallback;       // Image upload
-    private ActivityResultLauncher<Intent> fileChooserLauncher; // Image upload
+    private boolean errorOccurred = false;
+    private ValueCallback<Uri[]> mFilePathCallback;
+    private ActivityResultLauncher<Intent> fileChooserLauncher;
     private WebAppInterface webAppInterface;
     private BroadcastReceiver unifiedPushEndpointReceiver;
     private BroadcastReceiver mediaActionReceiver;
@@ -159,7 +159,6 @@ public class MainActivity extends AppCompatActivity {
             getWindow().setNavigationBarColor(Color.TRANSPARENT);
         }
 
-        // Create the NotificationChannel, but only on API 26+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             int importance = NotificationManager.IMPORTANCE_DEFAULT;
             NotificationChannel channel = new NotificationChannel(NOTIFICATION_CHANNEL_ID, NOTIFICATION_CHANNEL_NAME, importance);
@@ -178,7 +177,6 @@ public class MainActivity extends AppCompatActivity {
         parentLayout = (ViewGroup) mainLayout.getParent();
         userScriptManager = new UserScriptManager(this, mainURL);
 
-        // Handle intent
         Intent intent = getIntent();
         String action = intent.getAction();
         Uri data = intent.getData();
@@ -238,7 +236,6 @@ public class MainActivity extends AppCompatActivity {
         cookieManager.setCookie(mainURL, cookies);
         cookieManager.flush();
 
-        // Image upload support
         fileChooserLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
             result -> {
@@ -265,7 +262,6 @@ public class MainActivity extends AppCompatActivity {
             }
         );
 
-        // File downloading support
         webview.setDownloadListener(new DownloadListener() {
             @Override
             public void onDownloadStart(String url, String userAgent, String contentDisposition, String mimetype, long contentLength) {
@@ -294,7 +290,6 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // Broadcast receiver to get the endpoint from the PushServiceImpl
         unifiedPushEndpointReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
@@ -509,7 +504,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private class CustomWebChrome extends WebChromeClient {
-
         @Override
         public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
             String src = consoleMessage.sourceId();
@@ -1258,6 +1252,58 @@ public class MainActivity extends AppCompatActivity {
                     Log.d("WebToApk", "Cache cleared via WebToAPK.clearAppCache() from js");
                 }
             });
+        }
+
+        // ========== 新增：消息提示音和来电铃声方法 ==========
+        
+        @JavascriptInterface
+        public void playMessageSound() {
+            Intent intent = new Intent(context, MediaPlaybackService.class);
+            intent.setAction(MediaPlaybackService.ACTION_PLAY_MESSAGE_SOUND);
+            context.startService(intent);
+        }
+
+        @JavascriptInterface
+        public void playCallIncomingSound() {
+            Intent intent = new Intent(context, MediaPlaybackService.class);
+            intent.setAction(MediaPlaybackService.ACTION_PLAY_CALL_INCOMING);
+            context.startService(intent);
+        }
+
+        @JavascriptInterface
+        public void playCallOutgoingSound() {
+            Intent intent = new Intent(context, MediaPlaybackService.class);
+            intent.setAction(MediaPlaybackService.ACTION_PLAY_CALL_OUTGOING);
+            context.startService(intent);
+        }
+
+        @JavascriptInterface
+        public void stopCallSound() {
+            Intent intent = new Intent(context, MediaPlaybackService.class);
+            intent.setAction(MediaPlaybackService.ACTION_STOP_CALL_SOUND);
+            context.startService(intent);
+        }
+
+        @JavascriptInterface
+        public void vibrate(int duration) {
+            Intent intent = new Intent(context, MediaPlaybackService.class);
+            intent.setAction(MediaPlaybackService.ACTION_VIBRATE);
+            intent.putExtra("duration", duration);
+            context.startService(intent);
+        }
+
+        @JavascriptInterface
+        public void vibrateLong() {
+            Intent intent = new Intent(context, MediaPlaybackService.class);
+            intent.setAction(MediaPlaybackService.ACTION_VIBRATE_LONG);
+            context.startService(intent);
+        }
+
+        @JavascriptInterface
+        public void stopVibrate() {
+            Intent intent = new Intent(context, MediaPlaybackService.class);
+            intent.setAction(MediaPlaybackService.ACTION_STOP_VIBRATE);
+            context.startService(intent);
         }
     }
 
