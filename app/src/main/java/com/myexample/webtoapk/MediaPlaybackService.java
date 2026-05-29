@@ -11,6 +11,9 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
+import android.net.wifi.WifiManager;
+import android.media.AudioAttributes;
 import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
@@ -54,7 +57,7 @@ public class MediaPlaybackService extends Service {
     public static final String ACTION_NEXT = "com.myexample.webtoapk.NEXT";
     public static final String ACTION_PREVIOUS = "com.myexample.webtoapk.PREVIOUS";
 
-    // 新增：消息和铃声相关的 Action
+    // 消息和铃声相关的 Action
     public static final String ACTION_PLAY_MESSAGE_SOUND = "com.myexample.webtoapk.PLAY_MESSAGE_SOUND";
     public static final String ACTION_PLAY_CALL_INCOMING = "com.myexample.webtoapk.PLAY_CALL_INCOMING";
     public static final String ACTION_PLAY_CALL_OUTGOING = "com.myexample.webtoapk.PLAY_CALL_OUTGOING";
@@ -72,9 +75,10 @@ public class MediaPlaybackService extends Service {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private BroadcastReceiver becomingNoisyReceiver;
     
-    // 新增：声音播放相关变量
+    // 声音播放与后台锁变量
     private MediaPlayer callMediaPlayer;
     private Vibrator vibrator;
+    private WifiManager.WifiLock wifiLock;
     private boolean isRinging = false;
 
     // Inner class to handle the BECOMING_NOISY event
@@ -94,6 +98,12 @@ public class MediaPlaybackService extends Service {
 
         // 初始化振动器
         vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
+
+        // 初始化无线网络常驻锁，防止熄屏断网
+        WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        if (wm != null) {
+            wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "WebToApk:WifiLock");
+        }
 
         mediaSession = new MediaSessionCompat(this, "WebToApkMediaSession");
         mediaSession.setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS |
@@ -136,9 +146,12 @@ public class MediaPlaybackService extends Service {
 
         becomingNoisyReceiver = new BecomingNoisyReceiver();
         IntentFilter intentFilter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
-        registerReceiver(becomingNoisyReceiver, intentFilter);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(becomingNoisyReceiver, intentFilter, RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(becomingNoisyReceiver, intentFilter);
+        }
     }
-    
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
@@ -186,7 +199,7 @@ public class MediaPlaybackService extends Service {
                 sendActionToWebView("previoustrack");
                 break;
                 
-            // ========== 新增：消息和铃声处理 ==========
+            // 消息和铃声处理机制
             case ACTION_PLAY_MESSAGE_SOUND:
                 playMessageSound();
                 break;
@@ -213,62 +226,116 @@ public class MediaPlaybackService extends Service {
         return START_STICKY;
     }
 
-    // ========== 新增：消息提示音方法 ==========
+    // 辅助保障方法：确保后台被拦截时强行前台常驻
+    private void showBackgroundActiveNotification(String text) {
+        Intent contentIntent = new Intent(this, MainActivity.class);
+        PendingIntent contentPendingIntent = PendingIntent.getActivity(this, 0, contentIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_popup_remainder)
+                .setContentTitle("服务在后台运行中")
+                .setContentText(text)
+                .setContentIntent(contentPendingIntent)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(true);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, builder.build(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+        } else {
+            startForeground(NOTIFICATION_ID, builder.build());
+        }
+    }
+
+    // 消息提示音方法（加入前台锁与唤醒锁）
     private void playMessageSound() {
         try {
-            stopCallSound(); // 先停止可能正在播放的铃声
+            stopCallSound(); 
+            showBackgroundActiveNotification("收到新通知消息");
+
             Uri soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
-            MediaPlayer mp = MediaPlayer.create(this, soundUri);
-            if (mp != null) {
-                mp.setOnCompletionListener(m -> {
-                    if (m != null) m.release();
-                });
-                mp.start();
+            MediaPlayer mp = new MediaPlayer();
+            mp.setDataSource(this, soundUri);
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                mp.setAudioAttributes(new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build());
+            } else {
+                mp.setAudioStreamType(AudioManager.STREAM_NOTIFICATION);
             }
+
+            // 锁定 CPU，防止熄屏中断
+            mp.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK);
+            
+            mp.setOnPreparedListener(MediaPlayer::start);
+            mp.setOnCompletionListener(m -> {
+                if (m != null) {
+                    m.release();
+                }
+                // 播放完若无常规音乐播放，移出前台
+                PlaybackStateCompat s = mediaSession.getController().getPlaybackState();
+                if (!isRinging && (s == null || s.getState() != PlaybackStateCompat.STATE_PLAYING)) {
+                    stopForeground(false);
+                }
+            });
+            mp.prepareAsync();
         } catch (Exception e) {
             Log.e("WebToApk", "播放消息提示音失败", e);
         }
     }
 
-    // ========== 新增：来电铃声方法 ==========
+    // 通用呼叫铃声执行逻辑（含常驻前台与全唤醒锁）
+    private void playCallSoundInternal() {
+        try {
+            if (isRinging) return;
+            isRinging = true;
+            
+            stopCallSound();
+            showBackgroundActiveNotification("正在进行通话连接...");
+
+            if (wifiLock != null && !wifiLock.isHeld()) {
+                wifiLock.acquire();
+            }
+
+            Uri ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
+            callMediaPlayer = new MediaPlayer();
+            callMediaPlayer.setDataSource(this, ringtoneUri);
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                callMediaPlayer.setAudioAttributes(new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build());
+            } else {
+                callMediaPlayer.setAudioStreamType(AudioManager.STREAM_RING);
+            }
+            
+            // 维持 CPU 长期运转锁
+            callMediaPlayer.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK);
+            callMediaPlayer.setLooping(true);
+            
+            callMediaPlayer.setOnPreparedListener(MediaPlayer::start);
+            callMediaPlayer.prepareAsync();
+        } catch (Exception e) {
+            Log.e("WebToApk", "播放通话铃声失败", e);
+        }
+    }
+
     private void playCallIncomingSound() {
-        try {
-            if (isRinging) return;
-            isRinging = true;
-            
-            stopCallSound();
-            Uri ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
-            callMediaPlayer = MediaPlayer.create(this, ringtoneUri);
-            if (callMediaPlayer != null) {
-                callMediaPlayer.setLooping(true);
-                callMediaPlayer.start();
-            }
-        } catch (Exception e) {
-            Log.e("WebToApk", "播放来电铃声失败", e);
-        }
+        playCallSoundInternal();
     }
 
-    // ========== 新增：去电铃声方法 ==========
     private void playCallOutgoingSound() {
-        try {
-            if (isRinging) return;
-            isRinging = true;
-            
-            stopCallSound();
-            Uri ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
-            callMediaPlayer = MediaPlayer.create(this, ringtoneUri);
-            if (callMediaPlayer != null) {
-                callMediaPlayer.setLooping(true);
-                callMediaPlayer.start();
-            }
-        } catch (Exception e) {
-            Log.e("WebToApk", "播放去电铃声失败", e);
-        }
+        playCallSoundInternal();
     }
 
-    // ========== 新增：停止铃声方法 ==========
+    // 停止铃声方法
     private void stopCallSound() {
         isRinging = false;
+        if (wifiLock != null && wifiLock.isHeld()) {
+            wifiLock.release();
+        }
         if (callMediaPlayer != null) {
             try {
                 if (callMediaPlayer.isPlaying()) {
@@ -278,9 +345,15 @@ public class MediaPlaybackService extends Service {
             } catch (Exception e) {}
             callMediaPlayer = null;
         }
+
+        // 检查音乐是否处于非播放态，如是则撤销通知
+        PlaybackStateCompat s = mediaSession.getController().getPlaybackState();
+        if (s == null || s.getState() != PlaybackStateCompat.STATE_PLAYING) {
+            stopForeground(true);
+        }
     }
 
-    // ========== 新增：短振动方法 ==========
+    // 短振动
     private void vibrate(int duration) {
         if (vibrator != null && vibrator.hasVibrator()) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -291,7 +364,7 @@ public class MediaPlaybackService extends Service {
         }
     }
 
-    // ========== 新增：长振动方法（来电用） ==========
+    // 长循环振动（来电匹配）
     private void vibrateLong() {
         if (vibrator != null && vibrator.hasVibrator()) {
             long[] pattern = {0, 500, 300, 500, 300, 500};
@@ -303,7 +376,7 @@ public class MediaPlaybackService extends Service {
         }
     }
 
-    // ========== 新增：停止振动方法 ==========
+    // 停止振动
     private void stopVibrate() {
         if (vibrator != null) {
             vibrator.cancel();
@@ -389,11 +462,20 @@ public class MediaPlaybackService extends Service {
         mediaSession.setPlaybackState(newStateBuilder.build());
 
         if (state == PlaybackStateCompat.STATE_PLAYING || state == PlaybackStateCompat.STATE_PAUSED) {
-            startForeground(NOTIFICATION_ID, buildNotification());
+            Notification n = buildNotification();
+            if (n != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(NOTIFICATION_ID, n, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+                } else {
+                    startForeground(NOTIFICATION_ID, n);
+                }
+            }
         } else {
-            stopForeground(false);
-            NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID);
-            if (state == PlaybackStateCompat.STATE_STOPPED) {
+            if (!isRinging) {
+                stopForeground(false);
+                NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID);
+            }
+            if (state == PlaybackStateCompat.STATE_STOPPED && !isRinging) {
                  stopSelf();
             }
         }
@@ -511,7 +593,9 @@ public class MediaPlaybackService extends Service {
                  NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification);
             }
         } else {
-            NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID);
+            if (!isRinging) {
+                NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID);
+            }
         }
     }
     
