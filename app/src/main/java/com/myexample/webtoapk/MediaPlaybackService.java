@@ -1,6 +1,8 @@
 package com.myexample.webtoapk;
 
 import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
@@ -8,9 +10,7 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Build;
-import android.os.Handler;
 import android.os.IBinder;
-import android.os.Looper;
 import android.os.PowerManager;
 import android.net.wifi.WifiManager;
 import android.media.AudioAttributes;
@@ -22,7 +22,6 @@ import android.util.Base64;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.media.RingtoneManager;
-import android.net.Uri;
 import android.content.BroadcastReceiver;
 import android.content.IntentFilter;
 import android.os.Vibrator;
@@ -35,9 +34,6 @@ import androidx.core.app.NotificationCompat.Action;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import androidx.media.app.NotificationCompat.MediaStyle;
 
-import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -51,13 +47,11 @@ public class MediaPlaybackService extends Service {
     public static final String ACTION_STOP_SERVICE = "com.myexample.webtoapk.STOP_SERVICE";
     public static final String ACTION_UPDATE_POSITION = "com.myexample.webtoapk.UPDATE_POSITION";
 
-    // Actions from notification buttons
     public static final String ACTION_PLAY = "com.myexample.webtoapk.PLAY";
     public static final String ACTION_PAUSE = "com.myexample.webtoapk.PAUSE";
     public static final String ACTION_NEXT = "com.myexample.webtoapk.NEXT";
     public static final String ACTION_PREVIOUS = "com.myexample.webtoapk.PREVIOUS";
 
-    // 消息和铃声相关的 Action
     public static final String ACTION_PLAY_MESSAGE_SOUND = "com.myexample.webtoapk.PLAY_MESSAGE_SOUND";
     public static final String ACTION_PLAY_CALL_INCOMING = "com.myexample.webtoapk.PLAY_CALL_INCOMING";
     public static final String ACTION_PLAY_CALL_OUTGOING = "com.myexample.webtoapk.PLAY_CALL_OUTGOING";
@@ -66,7 +60,6 @@ public class MediaPlaybackService extends Service {
     public static final String ACTION_VIBRATE_LONG = "com.myexample.webtoapk.VIBRATE_LONG";
     public static final String ACTION_STOP_VIBRATE = "com.myexample.webtoapk.STOP_VIBRATE";
 
-    // Action for broadcasting to MainActivity
     public static final String BROADCAST_MEDIA_ACTION = "com.myexample.webtoapk.BROADCAST_MEDIA_ACTION";
     public static final String EXTRA_MEDIA_ACTION = "EXTRA_MEDIA_ACTION";
 
@@ -75,18 +68,16 @@ public class MediaPlaybackService extends Service {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private BroadcastReceiver becomingNoisyReceiver;
     
-    // 声音播放与后台锁变量
     private MediaPlayer callMediaPlayer;
     private Vibrator vibrator;
     private WifiManager.WifiLock wifiLock;
+    private PowerManager.WakeLock wakeLock;
     private boolean isRinging = false;
 
-    // Inner class to handle the BECOMING_NOISY event
     private class BecomingNoisyReceiver extends BroadcastReceiver {
         @Override
         public void onReceive(Context context, Intent intent) {
             if (AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(intent.getAction())) {
-                Log.d("WebToApk", "Audio becoming noisy, sending 'pause' action.");
                 sendActionToWebView("pause");
             }
         }
@@ -95,15 +86,20 @@ public class MediaPlaybackService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
-
-        // 初始化振动器
         vibrator = (Vibrator) getSystemService(VIBRATOR_SERVICE);
 
-        // 初始化无线网络常驻锁，防止熄屏断网
+        // 申请标准的电源锁与网络锁，防止后台断网断流
+        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (pm != null) {
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "WebToApk:WakeLock");
+        }
         WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
         if (wm != null) {
             wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "WebToApk:WifiLock");
         }
+
+        // 创建通知渠道（防止高版本系统无法弹出通知）
+        createNotificationChannel();
 
         mediaSession = new MediaSessionCompat(this, "WebToApkMediaSession");
         mediaSession.setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS |
@@ -117,29 +113,15 @@ public class MediaPlaybackService extends Service {
 
         mediaSession.setCallback(new MediaSessionCompat.Callback() {
             @Override
-            public void onPlay() {
-                sendActionToWebView("play");
-            }
-
+            public void onPlay() { sendActionToWebView("play"); }
             @Override
-            public void onPause() {
-                sendActionToWebView("pause");
-            }
-
+            public void onPause() { sendActionToWebView("pause"); }
             @Override
-            public void onSkipToNext() {
-                sendActionToWebView("nexttrack");
-            }
-
+            public void onSkipToNext() { sendActionToWebView("nexttrack"); }
             @Override
-            public void onSkipToPrevious() {
-                sendActionToWebView("previoustrack");
-            }
-
+            public void onSkipToPrevious() { sendActionToWebView("previoustrack"); }
             @Override
-            public void onStop() {
-                sendActionToWebView("stop");
-            }
+            public void onStop() { sendActionToWebView("stop"); }
         });
 
         mediaSession.setActive(true);
@@ -153,6 +135,20 @@ public class MediaPlaybackService extends Service {
         }
     }
 
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            NotificationChannel channel = new NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    "Web App Notifications",
+                    NotificationManager.IMPORTANCE_LOW
+            );
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) {
+                manager.createNotificationChannel(channel);
+            }
+        }
+    }
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null || intent.getAction() == null) {
@@ -160,25 +156,15 @@ public class MediaPlaybackService extends Service {
         }
 
         String action = intent.getAction();
-
         switch (action) {
             case ACTION_UPDATE_METADATA:
-                updateMetadata(
-                    intent.getStringExtra("title"),
-                    intent.getStringExtra("artist"),
-                    intent.getStringExtra("album"),
-                    intent.getStringExtra("artworkUrl")
-                );
+                updateMetadata(intent.getStringExtra("title"), intent.getStringExtra("artist"), intent.getStringExtra("album"), intent.getStringExtra("artworkUrl"));
                 break;
             case ACTION_UPDATE_STATE:
                 updatePlaybackState(intent.getStringExtra("state"));
                 break;
             case ACTION_UPDATE_POSITION:
-                updatePositionState(
-                    intent.getDoubleExtra("duration", 0),
-                    intent.getDoubleExtra("playbackRate", 1.0),
-                    intent.getDoubleExtra("position", 0)
-                );
+                updatePositionState(intent.getDoubleExtra("duration", 0), intent.getDoubleExtra("playbackRate", 1.0), intent.getDoubleExtra("position", 0));
                 break;
             case ACTION_SET_HANDLERS:
                 setMediaActionHandlers(intent.getStringArrayExtra("actions"));
@@ -186,71 +172,46 @@ public class MediaPlaybackService extends Service {
             case ACTION_STOP_SERVICE:
                 stopSelf();
                 break;
-            case ACTION_PLAY:
-                sendActionToWebView("play");
-                break;
-            case ACTION_PAUSE:
-                sendActionToWebView("pause");
-                break;
-            case ACTION_NEXT:
-                sendActionToWebView("nexttrack");
-                break;
-            case ACTION_PREVIOUS:
-                sendActionToWebView("previoustrack");
-                break;
-                
-            // 消息和铃声处理机制
-            case ACTION_PLAY_MESSAGE_SOUND:
-                playMessageSound();
-                break;
-            case ACTION_PLAY_CALL_INCOMING:
-                playCallIncomingSound();
-                break;
-            case ACTION_PLAY_CALL_OUTGOING:
-                playCallOutgoingSound();
-                break;
-            case ACTION_STOP_CALL_SOUND:
-                stopCallSound();
-                break;
-            case ACTION_VIBRATE:
-                vibrate(intent.getIntExtra("duration", 200));
-                break;
-            case ACTION_VIBRATE_LONG:
-                vibrateLong();
-                break;
-            case ACTION_STOP_VIBRATE:
-                stopVibrate();
-                break;
+            case ACTION_PLAY: sendActionToWebView("play"); break;
+            case ACTION_PAUSE: sendActionToWebView("pause"); break;
+            case ACTION_NEXT: sendActionToWebView("nexttrack"); break;
+            case ACTION_PREVIOUS: sendActionToWebView("previoustrack"); break;
+            case ACTION_PLAY_MESSAGE_SOUND: playMessageSound(); break;
+            case ACTION_PLAY_CALL_INCOMING: playCallIncomingSound(); break;
+            case ACTION_PLAY_CALL_OUTGOING: playCallOutgoingSound(); break;
+            case ACTION_STOP_CALL_SOUND: stopCallSound(); break;
+            case ACTION_VIBRATE: vibrate(intent.getIntExtra("duration", 200)); break;
+            case ACTION_VIBRATE_LONG: vibrateLong(); break;
+            case ACTION_STOP_VIBRATE: stopVibrate(); break;
         }
 
         return START_STICKY;
     }
 
-    // 辅助保障方法：确保后台被拦截时强行前台常驻
+    // 🌟 修复核心：使用兼容所有高低版本系统的通用保活通知
     private void showBackgroundActiveNotification(String text) {
         Intent contentIntent = new Intent(this, MainActivity.class);
         PendingIntent contentPendingIntent = PendingIntent.getActivity(this, 0, contentIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+        Notification notification = new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_popup_remainder)
-                .setContentTitle("服务在后台运行中")
+                .setContentTitle("系统后台通讯服务")
                 .setContentText(text)
                 .setContentIntent(contentPendingIntent)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
-                .setOngoing(true);
+                .setOngoing(true)
+                .build();
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, builder.build(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
-        } else {
-            startForeground(NOTIFICATION_ID, builder.build());
-        }
+        // 避开硬编码的 FOREGROUND_SERVICE_TYPE 检查，防止打包报错或运行崩溃
+        startForeground(NOTIFICATION_ID, notification);
     }
 
-    // 消息提示音方法（加入前台锁与唤醒锁）
     private void playMessageSound() {
         try {
             stopCallSound(); 
-            showBackgroundActiveNotification("收到新通知消息");
+            showBackgroundActiveNotification("正在处理新消息提示...");
+
+            if (wakeLock != null && !wakeLock.isHeld()) wakeLock.acquire(3000);
 
             Uri soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
             MediaPlayer mp = new MediaPlayer();
@@ -265,18 +226,12 @@ public class MediaPlaybackService extends Service {
                 mp.setAudioStreamType(AudioManager.STREAM_NOTIFICATION);
             }
 
-            // 锁定 CPU，防止熄屏中断
-            mp.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK);
-            
             mp.setOnPreparedListener(MediaPlayer::start);
             mp.setOnCompletionListener(m -> {
-                if (m != null) {
-                    m.release();
-                }
-                // 播放完若无常规音乐播放，移出前台
+                if (m != null) m.release();
                 PlaybackStateCompat s = mediaSession.getController().getPlaybackState();
                 if (!isRinging && (s == null || s.getState() != PlaybackStateCompat.STATE_PLAYING)) {
-                    stopForeground(false);
+                    stopForeground(true);
                 }
             });
             mp.prepareAsync();
@@ -285,18 +240,16 @@ public class MediaPlaybackService extends Service {
         }
     }
 
-    // 通用呼叫铃声执行逻辑（含常驻前台与全唤醒锁）
     private void playCallSoundInternal() {
         try {
             if (isRinging) return;
             isRinging = true;
             
             stopCallSound();
-            showBackgroundActiveNotification("正在进行通话连接...");
+            showBackgroundActiveNotification("正在保持网络通话连接...");
 
-            if (wifiLock != null && !wifiLock.isHeld()) {
-                wifiLock.acquire();
-            }
+            if (wakeLock != null && !wakeLock.isHeld()) wakeLock.acquire();
+            if (wifiLock != null && !wifiLock.isHeld()) wifiLock.acquire();
 
             Uri ringtoneUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE);
             callMediaPlayer = new MediaPlayer();
@@ -311,10 +264,7 @@ public class MediaPlaybackService extends Service {
                 callMediaPlayer.setAudioStreamType(AudioManager.STREAM_RING);
             }
             
-            // 维持 CPU 长期运转锁
-            callMediaPlayer.setWakeMode(this, PowerManager.PARTIAL_WAKE_LOCK);
             callMediaPlayer.setLooping(true);
-            
             callMediaPlayer.setOnPreparedListener(MediaPlayer::start);
             callMediaPlayer.prepareAsync();
         } catch (Exception e) {
@@ -322,38 +272,28 @@ public class MediaPlaybackService extends Service {
         }
     }
 
-    private void playCallIncomingSound() {
-        playCallSoundInternal();
-    }
+    private void playCallIncomingSound() { playCallSoundInternal(); }
+    private void playCallOutgoingSound() { playCallSoundInternal(); }
 
-    private void playCallOutgoingSound() {
-        playCallSoundInternal();
-    }
-
-    // 停止铃声方法
     private void stopCallSound() {
         isRinging = false;
-        if (wifiLock != null && wifiLock.isHeld()) {
-            wifiLock.release();
-        }
+        if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+        
         if (callMediaPlayer != null) {
             try {
-                if (callMediaPlayer.isPlaying()) {
-                    callMediaPlayer.stop();
-                }
+                if (callMediaPlayer.isPlaying()) callMediaPlayer.stop();
                 callMediaPlayer.release();
             } catch (Exception e) {}
             callMediaPlayer = null;
         }
 
-        // 检查音乐是否处于非播放态，如是则撤销通知
         PlaybackStateCompat s = mediaSession.getController().getPlaybackState();
         if (s == null || s.getState() != PlaybackStateCompat.STATE_PLAYING) {
             stopForeground(true);
         }
     }
 
-    // 短振动
     private void vibrate(int duration) {
         if (vibrator != null && vibrator.hasVibrator()) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -364,7 +304,6 @@ public class MediaPlaybackService extends Service {
         }
     }
 
-    // 长循环振动（来电匹配）
     private void vibrateLong() {
         if (vibrator != null && vibrator.hasVibrator()) {
             long[] pattern = {0, 500, 300, 500, 300, 500};
@@ -376,11 +315,8 @@ public class MediaPlaybackService extends Service {
         }
     }
 
-    // 停止振动
     private void stopVibrate() {
-        if (vibrator != null) {
-            vibrator.cancel();
-        }
+        if (vibrator != null) vibrator.cancel();
     }
 
     private void updateMetadata(String title, String artist, String album, @Nullable String artworkUrl) {
@@ -395,36 +331,24 @@ public class MediaPlaybackService extends Service {
                 byte[] decodedBytes = Base64.decode(base64String, Base64.DEFAULT);
                 Bitmap artworkBitmap = BitmapFactory.decodeByteArray(decodedBytes, 0, decodedBytes.length);
                 metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artworkBitmap);
-                mediaSession.setMetadata(metadataBuilder.build());
-                updateNotification();
             } catch (Exception e) {
                 Log.e("WebToApk", "Error decoding Base64 artwork", e);
-                mediaSession.setMetadata(metadataBuilder.build());
-                updateNotification();
             }
-        } else {
-            mediaSession.setMetadata(metadataBuilder.build());
-            updateNotification();
         }
+        mediaSession.setMetadata(metadataBuilder.build());
+        updateNotification();
     }
 
     private void updatePositionState(double duration, double playbackRate, double position) {
         PlaybackStateCompat currentState = mediaSession.getController().getPlaybackState();
-        if (currentState == null || currentState.getState() == PlaybackStateCompat.STATE_NONE) {
-            return;
-        }
+        if (currentState == null || currentState.getState() == PlaybackStateCompat.STATE_NONE) return;
 
         long durationMs = (long) (duration * 1000);
         long positionMs = (long) (position * 1000);
         float rate = (float) playbackRate;
 
         MediaMetadataCompat currentMetadata = mediaSession.getController().getMetadata();
-        MediaMetadataCompat.Builder metadataBuilder;
-        if (currentMetadata == null) {
-            metadataBuilder = new MediaMetadataCompat.Builder();
-        } else {
-            metadataBuilder = new MediaMetadataCompat.Builder(currentMetadata);
-        }
+        MediaMetadataCompat.Builder metadataBuilder = currentMetadata == null ? new MediaMetadataCompat.Builder() : new MediaMetadataCompat.Builder(currentMetadata);
         metadataBuilder.putLong(MediaMetadataCompat.METADATA_KEY_DURATION, durationMs);
         mediaSession.setMetadata(metadataBuilder.build());
 
@@ -438,23 +362,14 @@ public class MediaPlaybackService extends Service {
     private void updatePlaybackState(String stateStr) {
         PlaybackStateCompat currentState = mediaSession.getController().getPlaybackState();
         if (currentState == null) {
-            currentState = new PlaybackStateCompat.Builder()
-                .setActions(0)
-                .setState(PlaybackStateCompat.STATE_NONE, 0, 1.0f)
-                .build();
+            currentState = new PlaybackStateCompat.Builder().setActions(0).setState(PlaybackStateCompat.STATE_NONE, 0, 1.0f).build();
         }
 
         int state;
         switch (stateStr) {
-            case "playing":
-                state = PlaybackStateCompat.STATE_PLAYING;
-                break;
-            case "paused":
-                state = PlaybackStateCompat.STATE_PAUSED;
-                break;
-            default:
-                state = PlaybackStateCompat.STATE_STOPPED;
-                break;
+            case "playing": state = PlaybackStateCompat.STATE_PLAYING; break;
+            case "paused": state = PlaybackStateCompat.STATE_PAUSED; break;
+            default: state = PlaybackStateCompat.STATE_STOPPED; break;
         }
 
         PlaybackStateCompat.Builder newStateBuilder = new PlaybackStateCompat.Builder(currentState);
@@ -463,16 +378,10 @@ public class MediaPlaybackService extends Service {
 
         if (state == PlaybackStateCompat.STATE_PLAYING || state == PlaybackStateCompat.STATE_PAUSED) {
             Notification n = buildNotification();
-            if (n != null) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    startForeground(NOTIFICATION_ID, n, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
-                } else {
-                    startForeground(NOTIFICATION_ID, n);
-                }
-            }
+            if (n != null) startForeground(NOTIFICATION_ID, n);
         } else {
             if (!isRinging) {
-                stopForeground(false);
+                stopForeground(true);
                 NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID);
             }
             if (state == PlaybackStateCompat.STATE_STOPPED && !isRinging) {
@@ -489,18 +398,10 @@ public class MediaPlaybackService extends Service {
         if (actions != null) {
             for (String action : actions) {
                 switch (action) {
-                    case "play":
-                        supportedActions |= PlaybackStateCompat.ACTION_PLAY;
-                        break;
-                    case "pause":
-                        supportedActions |= PlaybackStateCompat.ACTION_PAUSE;
-                        break;
-                    case "previoustrack":
-                        supportedActions |= PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS;
-                        break;
-                    case "nexttrack":
-                        supportedActions |= PlaybackStateCompat.ACTION_SKIP_TO_NEXT;
-                        break;
+                    case "play": supportedActions |= PlaybackStateCompat.ACTION_PLAY; break;
+                    case "pause": supportedActions |= PlaybackStateCompat.ACTION_PAUSE; break;
+                    case "previoustrack": supportedActions |= PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS; break;
+                    case "nexttrack": supportedActions |= PlaybackStateCompat.ACTION_SKIP_TO_NEXT; break;
                 }
             }
         }
@@ -524,15 +425,11 @@ public class MediaPlaybackService extends Service {
         }
 
         boolean isPlaying = playbackState.getState() == PlaybackStateCompat.STATE_PLAYING;
-
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID);
         List<Integer> compactActionIndices = new ArrayList<>();
 
         if ((playbackState.getActions() & PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS) != 0) {
-            builder.addAction(
-                android.R.drawable.ic_media_previous, "Previous",
-                createActionIntent(ACTION_PREVIOUS)
-            );
+            builder.addAction(android.R.drawable.ic_media_previous, "Previous", createActionIntent(ACTION_PREVIOUS));
             compactActionIndices.add(compactActionIndices.size());
         }
 
@@ -546,17 +443,12 @@ public class MediaPlaybackService extends Service {
         }
 
         if ((playbackState.getActions() & PlaybackStateCompat.ACTION_SKIP_TO_NEXT) != 0) {
-            builder.addAction(
-                android.R.drawable.ic_media_next, "Next",
-                createActionIntent(ACTION_NEXT)
-            );
+            builder.addAction(android.R.drawable.ic_media_next, "Next", createActionIntent(ACTION_NEXT));
             compactActionIndices.add(compactActionIndices.size());
         }
 
         int[] compactIndices = new int[compactActionIndices.size()];
-        for (int i = 0; i < compactActionIndices.size(); i++) {
-            compactIndices[i] = compactActionIndices.get(i);
-        }
+        for (int i = 0; i < compactActionIndices.size(); i++) compactIndices[i] = compactActionIndices.get(i);
 
         Intent contentIntent = new Intent(this, MainActivity.class);
         PendingIntent contentPendingIntent = PendingIntent.getActivity(this, 0, contentIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
@@ -573,37 +465,27 @@ public class MediaPlaybackService extends Service {
             .setDeleteIntent(deletePendingIntent)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setOnlyAlertOnce(true)
-            .setStyle(new MediaStyle()
-                .setMediaSession(mediaSession.getSessionToken())
-                .setShowActionsInCompactView(compactIndices)
-            );
+            .setStyle(new MediaStyle().setMediaSession(mediaSession.getSessionToken()).setShowActionsInCompactView(compactIndices));
 
         return builder.build();
     }
 
     private void updateNotification() {
-        if (mediaSession.getController().getPlaybackState() == null) {
-            return;
-        }
+        if (mediaSession.getController().getPlaybackState() == null) return;
 
         PlaybackStateCompat state = mediaSession.getController().getPlaybackState();
         if (state.getState() == PlaybackStateCompat.STATE_PLAYING || state.getState() == PlaybackStateCompat.STATE_PAUSED) {
             Notification notification = buildNotification();
-            if (notification != null) {
-                 NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification);
-            }
+            if (notification != null) NotificationManagerCompat.from(this).notify(NOTIFICATION_ID, notification);
         } else {
-            if (!isRinging) {
-                NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID);
-            }
+            if (!isRinging) NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID);
         }
     }
     
     private PendingIntent createActionIntent(String action) {
         Intent intent = new Intent(this, MediaPlaybackService.class);
         intent.setAction(action);
-        int requestCode = action.hashCode();
-        return PendingIntent.getService(this, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        return PendingIntent.getService(this, action.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
     
     private void sendActionToWebView(String action) {
@@ -617,18 +499,11 @@ public class MediaPlaybackService extends Service {
         super.onDestroy();
         stopCallSound();
         stopVibrate();
-        if (mediaSession != null) {
-            mediaSession.release();
-        }
+        if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        if (mediaSession != null) mediaSession.release();
         executor.shutdown();
-        try {
-            unregisterReceiver(becomingNoisyReceiver);
-        } catch (Exception e) {}
+        try { unregisterReceiver(becomingNoisyReceiver); } catch (Exception e) {}
     }
     
-    @Nullable
-    @Override
-    public IBinder onBind(Intent intent) {
-        return null;
-    }
+    @Nullable @Override public IBinder onBind(Intent intent) { return null; }
 }
