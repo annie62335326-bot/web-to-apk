@@ -65,12 +65,6 @@ dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'androidx.core:core:1.9.0'
     implementation 'org.unifiedpush.android:connector:3.0.10'
-    
-    // 修改这两行
-    implementation 'androidx.media:media:1.7.0'  // 从 1.6.0 升级到 1.7.0
+    implementation 'androidx.media:media:1.6.0'
     implementation 'androidx.localbroadcastmanager:localbroadcastmanager:1.1.0'
-    
-    // ⭐ 重点：添加这两个依赖（解决 MediaSessionCompat 错误）
-    implementation 'androidx.media2:media2-session:1.2.1'
-    implementation 'androidx.legacy:legacy-support-v4:1.0.0'
 }
