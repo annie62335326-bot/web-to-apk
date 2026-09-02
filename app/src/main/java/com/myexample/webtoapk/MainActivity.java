@@ -107,7 +107,7 @@ public class MainActivity extends AppCompatActivity {
     private GeolocationPermissions.Callback geoCallback;
     private String geoOrigin;
 
-    String mainURL = "https://im8885.akfjcn.shop";
+    String mainURL = "https://gd.zsycm.xyz";
     boolean requireDoubleBackToExit = true;
     boolean allowSubdomains = true;
 
